@@ -1,0 +1,275 @@
+/*
+ * Copyright 2026 Maxime Ethier - Consultant en Bioinformatique/Biocomputing Consultant
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.bioinfo.phosscope.service;
+
+import com.bioinfo.phosscope.clean.CleaningResult;
+import com.bioinfo.phosscope.clean.DataCleaner;
+import com.bioinfo.phosscope.impute.MissingValueImputer;
+import com.bioinfo.phosscope.model.AnalysisSettings;
+import com.bioinfo.phosscope.model.AnalysisStatus;
+import com.bioinfo.phosscope.model.Group;
+import com.bioinfo.phosscope.model.Language;
+import com.bioinfo.phosscope.model.PhosphoSite;
+import com.bioinfo.phosscope.model.QuantTable;
+import com.bioinfo.phosscope.model.SiteStatistic;
+import com.bioinfo.phosscope.parse.ParseException;
+import com.bioinfo.phosscope.parse.SiteTableParser;
+import com.bioinfo.phosscope.report.PdfReportWriter;
+import com.bioinfo.phosscope.report.ResultTableWriter;
+import com.bioinfo.phosscope.stats.BenjaminiHochberg;
+import com.bioinfo.phosscope.stats.WelchTest;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+/**
+ * Facade of the model. The desktop application and the REST API both call this class and never the
+ * parsers, the cleaner or the tests directly.
+ *
+ * <p>The comparison is a Welch t-test on the log2 intensities, followed by a Benjamini–Hochberg
+ * adjustment. A site is significant when its q-value and its absolute log2 fold change both pass
+ * the thresholds of the settings.
+ */
+public final class PhosService {
+
+    /**
+     * Reads an uploaded file.
+     *
+     * @param content file bytes
+     * @param fileName original file name
+     * @return the quantitative table
+     * @throws ParseException when the file is not a readable table
+     */
+    public QuantTable read(byte[] content, String fileName) throws ParseException {
+        return SiteTableParser.parse(content, fileName);
+    }
+
+    /**
+     * Cleans, imputes and compares the two groups.
+     *
+     * @param table table returned by {@link #read}
+     * @param settings user choices; numeric ranges are checked by the settings themselves
+     * @return the drop counts and, when the groups allow it, one statistic per tested site
+     */
+    public Analysis analyze(QuantTable table, AnalysisSettings settings) {
+        List<Group> groups = groupsOf(table, settings);
+        CleaningResult cleaned = DataCleaner.clean(table, groups, settings);
+        int controls = count(groups, Group.CONTROL);
+        int diseases = count(groups, Group.DISEASE);
+        if (controls == 0 || diseases == 0) {
+            return result(table, settings, cleaned, 0, 0, AnalysisStatus.NEED_GROUPS, List.of());
+        }
+        if (controls < 2 || diseases < 2) {
+            return result(
+                    table, settings, cleaned, 0, 0, AnalysisStatus.NEED_REPLICATES, List.of());
+        }
+        if (cleaned.kept().isEmpty()) {
+            return result(table, settings, cleaned, 0, 0, AnalysisStatus.NO_SITE, List.of());
+        }
+        double[][] values = copy(cleaned.log2());
+        int imputed = MissingValueImputer.impute(values, settings);
+        List<Prepared> prepared = prepare(cleaned.kept(), cleaned.log2(), values, groups);
+        int incomplete = cleaned.kept().size() - prepared.size();
+        if (prepared.isEmpty()) {
+            return result(
+                    table,
+                    settings,
+                    cleaned,
+                    imputed,
+                    incomplete,
+                    AnalysisStatus.NO_SITE,
+                    List.of());
+        }
+        double[] pValues = new double[prepared.size()];
+        for (int i = 0; i < prepared.size(); i++) {
+            pValues[i] = prepared.get(i).test().pValue();
+        }
+        double[] qValues = BenjaminiHochberg.adjust(pValues);
+        List<SiteStatistic> sites = new ArrayList<>();
+        for (int i = 0; i < prepared.size(); i++) {
+            sites.add(statistic(prepared.get(i), qValues[i], settings));
+        }
+        sites.sort(SITE_ORDER);
+        return result(table, settings, cleaned, imputed, incomplete, AnalysisStatus.OK, sites);
+    }
+
+    /**
+     * Builds the PDF report of an analysis.
+     *
+     * @param analysis result of {@link #analyze}
+     * @param language language of the text
+     * @param title title typed by the user; a blank title becomes the application name
+     * @param simulated {@code true} when the table was generated by PhosScope
+     * @return the PDF bytes
+     */
+    public byte[] report(Analysis analysis, Language language, String title, boolean simulated) {
+        return PdfReportWriter.write(analysis, language, title, simulated);
+    }
+
+    /**
+     * Builds the tab-separated results, with a header in the requested language.
+     *
+     * @param analysis result of {@link #analyze}
+     * @param language language of the header
+     * @return UTF-8 text with a byte-order mark, so a spreadsheet opens the accents
+     */
+    public String exportTable(Analysis analysis, Language language) {
+        return ResultTableWriter.write(analysis, language);
+    }
+
+    private static final Comparator<SiteStatistic> SITE_ORDER =
+            Comparator.comparing(SiteStatistic::significant)
+                    .reversed()
+                    .thenComparingDouble(SiteStatistic::qValue)
+                    .thenComparing(
+                            Comparator.comparingDouble(
+                                            (SiteStatistic site) -> Math.abs(site.log2FoldChange()))
+                                    .reversed())
+                    .thenComparing(SiteStatistic::gene, Comparator.nullsLast(String::compareTo));
+
+    private static List<Group> groupsOf(QuantTable table, AnalysisSettings settings) {
+        List<Group> groups = new ArrayList<>();
+        for (String name : table.sampleNames()) {
+            groups.add(settings.groups().getOrDefault(name, Group.UNASSIGNED));
+        }
+        return groups;
+    }
+
+    private static int count(List<Group> groups, Group group) {
+        int total = 0;
+        for (Group candidate : groups) {
+            if (candidate == group) {
+                total++;
+            }
+        }
+        return total;
+    }
+
+    private static double[][] copy(double[][] source) {
+        double[][] copy = new double[source.length][];
+        for (int row = 0; row < source.length; row++) {
+            copy[row] = source[row].clone();
+        }
+        return copy;
+    }
+
+    private record Prepared(
+            PhosphoSite site, WelchTest.Result test, int observedControl, int observedDisease) {}
+
+    private static List<Prepared> prepare(
+            List<PhosphoSite> sites, double[][] original, double[][] imputed, List<Group> groups) {
+        List<Prepared> prepared = new ArrayList<>();
+        for (int row = 0; row < sites.size(); row++) {
+            if (containsMissing(imputed[row])) {
+                continue;
+            }
+            double[] control = valuesOf(imputed[row], groups, Group.CONTROL);
+            double[] disease = valuesOf(imputed[row], groups, Group.DISEASE);
+            prepared.add(
+                    new Prepared(
+                            sites.get(row),
+                            WelchTest.compare(control, disease),
+                            countFinite(original[row], groups, Group.CONTROL),
+                            countFinite(original[row], groups, Group.DISEASE)));
+        }
+        return prepared;
+    }
+
+    private static boolean containsMissing(double[] row) {
+        for (double value : row) {
+            if (!Double.isFinite(value)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static double[] valuesOf(double[] row, List<Group> groups, Group group) {
+        int count = count(groups, group);
+        double[] values = new double[count];
+        int index = 0;
+        for (int column = 0; column < row.length; column++) {
+            if (groups.get(column) == group) {
+                values[index++] = row[column];
+            }
+        }
+        return values;
+    }
+
+    private static int countFinite(double[] row, List<Group> groups, Group group) {
+        int total = 0;
+        for (int column = 0; column < row.length; column++) {
+            if (groups.get(column) == group && Double.isFinite(row[column])) {
+                total++;
+            }
+        }
+        return total;
+    }
+
+    private static SiteStatistic statistic(
+            Prepared prepared, double qValue, AnalysisSettings settings) {
+        PhosphoSite site = prepared.site();
+        WelchTest.Result test = prepared.test();
+        boolean significant =
+                qValue <= settings.fdr()
+                        && Math.abs(test.log2FoldChange()) >= settings.minAbsLog2FoldChange();
+        return new SiteStatistic(
+                site.protein(),
+                site.displayGene(),
+                site.proteinName(),
+                site.position(),
+                site.aminoAcid(),
+                site.multiplicity(),
+                test.controlMean(),
+                test.diseaseMean(),
+                test.log2FoldChange(),
+                test.tStatistic(),
+                test.degreesOfFreedom(),
+                test.pValue(),
+                qValue,
+                prepared.observedControl(),
+                prepared.observedDisease(),
+                significant);
+    }
+
+    private static Analysis result(
+            QuantTable table,
+            AnalysisSettings settings,
+            CleaningResult cleaned,
+            int imputed,
+            int incomplete,
+            AnalysisStatus status,
+            List<SiteStatistic> sites) {
+        return new Analysis(
+                table.format(),
+                table.fileName(),
+                table.sampleNames(),
+                settings,
+                cleaned.sitesRead(),
+                cleaned.droppedContaminant(),
+                cleaned.droppedReverse(),
+                cleaned.droppedOnlyBySite(),
+                cleaned.droppedLocalization(),
+                cleaned.droppedMissing(),
+                incomplete,
+                imputed,
+                cleaned.probabilityScale(),
+                status,
+                sites);
+    }
+}

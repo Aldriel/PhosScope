@@ -1,0 +1,18 @@
+PhosScope compare la phosphorylation d’un groupe témoin et d’un groupe malade.
+
+1. Données
+Ouvrez un fichier MaxQuant, par exemple Phospho (STY)Sites.txt, un tableau FragPipe dont les colonnes finissent par Intensity, ou un tableau délimité avec un identifiant et des colonnes d’échantillons. L’exemple simulé est inventé par PhosScope : ce ne sont pas des données de patients.
+
+Assignez chaque échantillon à Témoin ou Malade. Le programme devine le groupe d’après le nom (control, témoin, disease, patient, tumor…).
+
+2. Nettoyage
+Les contaminants, les leurres inversés et les peptides identifiés seulement comme site modifié sont retirés. Une probabilité de localisation sous 0,75 l’est aussi. Un AScore, supérieur à 1, n’est pas filtré par ce seuil. Un site doit être mesuré au moins deux fois dans chaque groupe.
+
+3. Imputation
+Une cellule vide ou nulle est une valeur manquante. Perseus la remplace, en log2, par un tirage dans une loi normale décalée de 1,8 écart-type sous la moyenne de l’échantillon et large de 0,3 fois cet écart-type. La même graine redonne les mêmes valeurs. La moitié du minimum place la valeur un log2 sous la plus faible valeur observée. Aucune ne garde que les sites complets.
+
+4. Résultats
+Un test t de Welch compare les groupes sans supposer des variances égales. Les valeurs p sont ajustées par Benjamini-Hochberg. Un site est significatif quand sa valeur q et son log2 fold change absolu passent tous les deux les seuils. Le volcan montre le log2 fold change et -log10(p).
+
+5. Rapport
+Le PDF rappelle les filtres, l’imputation et les sites significatifs. C’est un point de départ pour un biologiste, pas un diagnostic.

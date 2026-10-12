@@ -1,0 +1,18 @@
+PhosScope compares phosphorylation between a control group and a disease group.
+
+1. Data
+Open a MaxQuant file such as Phospho (STY)Sites.txt, a FragPipe table whose columns end with Intensity, or any delimited table with an identifier and sample columns. The simulated example is invented by PhosScope: it is not patient data.
+
+Assign each sample to Control or Disease. The program guesses the group from the sample name (control, temoin, disease, patient, tumor…).
+
+2. Cleaning
+Contaminants, reversed decoy hits and peptides identified only as a modified site are dropped. A localization probability under 0.75 is dropped too. An AScore, which is larger than 1, is not filtered by that threshold. A site must be measured at least twice in each group.
+
+3. Imputation
+Zero and empty cells are missing values. Perseus replaces them, on the log2 scale, by a draw from a normal law 1.8 standard deviations below the sample mean and 0.3 times as wide. The same seed always gives the same values. Half-minimum fills with one log2 unit under the lowest observed value. None keeps only complete sites.
+
+4. Results
+A Welch t-test compares the groups without assuming equal variances. p-values are adjusted by Benjamini-Hochberg. A site is significant when its q-value and its absolute log2 fold change both pass the thresholds. The volcano plot shows log2 fold change and -log10(p).
+
+5. Report
+The PDF states the filters, the imputation and the significant sites. It is a starting point for a biologist, not a clinical diagnosis.

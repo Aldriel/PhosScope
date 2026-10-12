@@ -1,0 +1,28 @@
+.phos-root {
+    -fx-background-color: #f4f1ea;
+}
+
+.footer {
+    -fx-background-color: #1c2430;
+}
+
+.footer .label {
+    -fx-text-fill: #f4f1ea;
+}
+
+.footer .button {
+    -fx-background-color: #0f6e6b;
+    -fx-text-fill: white;
+}
+
+.point-up {
+    -fx-fill: #0f6e6b;
+}
+
+.point-down {
+    -fx-fill: #b23a48;
+}
+
+.point-none {
+    -fx-fill: #8a8478;
+}
